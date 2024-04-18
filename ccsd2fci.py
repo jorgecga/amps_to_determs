@@ -16,7 +16,8 @@ class IndicesX:
         self.occ, self.virt = np.split(indx_x[0], 2)
 
 def t1_ixer(indx, t1, n_occ):
-    return [(amp, (1 + int(indx.spin == 'b')) * (4**i + 4**a))
+    offset = int(indx.spin == 'b')
+    return [(amp, (1<<(2 * i + offset)) | (1<<(2 * a + offset)))
             for i in indx.occ for a in indx.virt if (amp := t1[i, a - n_occ]) != 0]
 
 
@@ -30,7 +31,7 @@ def amp_assembler(indx_a, indx_b, t2, n_occ):
 
 
 def amp_gather(indx, offset, t2, n_occ):
-    return [(amp, 2**ix + 2**jx + 2**ax + 2**bx)
+    return [(amp, (1<<ix) | (1<<jx) | (1<<ax) | (1<<bx))
             for i in indx[0] for j in indx[1]
             if (ix := 2 * i + offset[0]) < (jx := 2 * j + offset[1])
             for a in indx[2] for b in indx[3]
