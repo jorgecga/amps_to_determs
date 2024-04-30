@@ -15,27 +15,50 @@ class IndicesX:
         indx_x = np.array(list(str_x[:1:-1]), dtype=int).nonzero()
         self.occ, self.virt = np.split(indx_x[0], 2)
 
-def t1_ixer(indx, t1, n_occ):
+
+class Determinant:
+    def __init__(self, nocc, indx_a, indx_b) -> None:
+        self.nocc= nocc
+        occs = np.hstack((2 * indx_a.occ, 2 * indx_b.occ + 1))
+        occs.sort()
+        self.occ = {val: idx for idx, val in enumerate(occs)}
+        virts = np.hstack((2 * indx_a.virt, 2 * indx_b.virt + 1))
+        virts.sort()
+        self.virt = {val: idx for idx, val in enumerate(virts)}
+
+
+def t1_ixer(indx, t1, det):
     offset = int(indx.spin == 'b')
-    return [(amp, (1<<(2 * i + offset)) | (1<<(2 * a + offset)))
-            for i in indx.occ for a in indx.virt if (amp := t1[i, a - n_occ]) != 0]
+    return [t1_gen(amp, i, a, offset, det)
+            for i in indx.occ for a in indx.virt if (amp := t1[i, a - det.nocc]) != 0]
 
 
-def amp_assembler(indx_a, indx_b, t2, n_occ):
+def t1_gen(amp, i, a, offset, det):
+    ix = 2 * i + offset
+    ax = 2 * a + offset
+    return (amp, (1<<ix) | (1<<ax), (det.occ[ix], det.virt[ax]))
+
+
+def t2_gen(amp, ix, jx, ax, bx, det):
+    return (amp, (1<<ix) | (1<<jx) | (1<<ax) | (1<<bx),
+            ((det.occ[ix], det.virt[ax]), (det.occ[jx], det.virt[bx])))
+
+
+def amp_assembler(indx_a, indx_b, t2, det):
     indxs = [indx_a.occ, indx_b.occ, indx_a.virt, indx_b.virt]
-    amps = amp_gather(indxs, [0, 1]*2, t2[0], n_occ)
-    amps += amp_gather(indxs[:2] + indxs[:1:-1], [0, 1, 1, 0], t2[1], n_occ)
-    amps += amp_gather(indxs[1::-1] + indxs[-2:], [1, 0, 0, 1], t2[1], n_occ)
-    amps += amp_gather(indxs[1::-1] + indxs[:1:-1], [1, 0]*2, t2[0], n_occ)
+    amps = amp_gather(indxs, [0, 1]*2, t2[0], det)
+    amps += amp_gather(indxs[:2] + indxs[:1:-1], [0, 1, 1, 0], t2[1], det)
+    amps += amp_gather(indxs[1::-1] + indxs[-2:], [1, 0, 0, 1], t2[1], det)
+    amps += amp_gather(indxs[1::-1] + indxs[:1:-1], [1, 0]*2, t2[0], det)
     return amps
 
 
-def amp_gather(indx, offset, t2, n_occ):
-    return [(amp, (1<<ix) | (1<<jx) | (1<<ax) | (1<<bx))
+def amp_gather(indx, offset, t2, det):
+    return [t2_gen(amp, ix, jx, ax, bx, det)
             for i in indx[0] for j in indx[1]
             if (ix := 2 * i + offset[0]) < (jx := 2 * j + offset[1])
             for a in indx[2] for b in indx[3]
-            if ((amp := t2[i, j, a - n_occ, b - n_occ]) !=0
+            if ((amp := t2[i, j, a - det.nocc, b - det.nocc]) !=0
                 and ((ax := 2 * a + offset[2]) < (bx := 2 * b + offset[3])))]
 
 
@@ -62,26 +85,24 @@ def amp2coef(str_orba, str_orbb, str_gs, t1, t2, nocc):
     num_x = len(indx_a.occ) + len(indx_b.occ)
     if num_x == 0:
         return 1.0
+        
+    det = Determinant(nocc, indx_a, indx_b)
     
-    t1a, t1b = mapper(t1_ixer, zip([indx_a, indx_b]), t1=t1, n_occ=nocc)
+    t1a, t1b = mapper(t1_ixer, zip([indx_a, indx_b]), t1=t1, det=det)
     t1_amps = t1a + t1b
     if len(t1_amps) > 0:
-        t1_coeffs, t1_orbs = zip(*t1_amps)
-        t1_amps = (np.array(t1_coeffs), np.array(t1_orbs))
+        t1_amps = tuple([np.array(col) for col in zip(*t1_amps)])
     else:
-        t1_amps = (np.empty(0), np.empty(0))
+        t1_amps = (np.empty(0), np.empty(0), ())
     
     t2_idxz = zip([[indx_a.occ]*2 + [indx_a.virt]*2,
                    [indx_b.occ]*2 + [indx_b.virt]*2],
                   [[0]*4, [1]*4])
-    t2aa, t2bb = mapper(amp_gather, t2_idxz, t2=t2[2], n_occ=nocc)
-    t2ab = amp_assembler(indx_a, indx_b, t2, nocc)
+    t2aa, t2bb = mapper(amp_gather, t2_idxz, t2=t2[2], det=det)
+    t2ab = amp_assembler(indx_a, indx_b, t2, det)
     t2_amps = t2aa + t2bb + t2ab
-    if len(t2_amps) > 0:
-        t2_coeffs, t2_orbs = zip(*t2_amps)
-        t2_amps = (np.array(t2_coeffs), np.array(t2_orbs))
-    else:
-        t2_amps = (np.empty(0), np.empty(0))
+    t2_amps = (tuple([np.array(col) for col in zip(*t2_amps)]) if len(t2_amps) > 0
+               else (np.empty(0), np.empty(0), ()))
 
     coeffs = (np.sum([combine_amps(t1_amps, t2_amps, num_x, k)
                       for k in range(num_x // 2 + 1)])
@@ -90,26 +111,69 @@ def amp2coef(str_orba, str_orbb, str_gs, t1, t2, nocc):
     return coeffs
 
 
+
 def combine_amps(t1_amps, t2_amps, num_x, n2):
     n1 = num_x - 2 * n2
 
     if n1 > len(t1_amps[0]) or n2 >len(t2_amps[0]):
         return 0
 
-    t1_prods, t1_orbs = (prodofcombs(t1_amps, n1) if n1 != 0
-                         else (np.array(1), np.array([0])))
-    if not t1_prods.any():
+    t1_out = (prodofcombs(t1_amps, n1, 2) if n1 != 0
+              else (np.array(1), np.array([0]), np.empty((1, 0, 2), dtype=int)))
+    if not t1_out[0].any():
         return 0
     
-    t2_prods, t2_orbs = (prodofcombs(t2_amps, n2) if n2 != 0
-                         else (np.array(1), np.array([0])))
-    if not t2_prods.any():
+    t2_out = (prodofcombs(t2_amps, n2, 4) if n2 != 0
+              else (np.array(1), np.array([0]), np.empty((1, 0, 2, 2), dtype=int)))
+    if not t2_out[0].any():
         return 0
 
-    mask = ~np.bitwise_and.outer(t1_orbs, t2_orbs).astype(bool)
+    mask = ~np.bitwise_and.outer(t1_out[1], t2_out[1]).astype(bool)
 
-    total_prod = np.outer(t1_prods, t2_prods)[mask]
-    return np.sum(total_prod)
+    total_prod = np.outer(t1_out[0], t2_out[0])[mask]
+
+    if total_prod.size == 0:
+        return 0
+    
+    sign_array = np.array([signed(t1_out[2][i], t2_out[2][j])
+                           for i, j in np.argwhere(mask)])
+    
+    return np.sum(total_prod * sign_array)
+
+
+def signed(t1_perms, t2_perms):
+    sources = np.concatenate((t1_perms[:, 0], t2_perms[:, :, 0].ravel()))
+    targets = np.concatenate((t1_perms[:, 1], t2_perms[:, :, 1].ravel()))
+
+    max_node = max(np.max(sources), np.max(targets)) + 1
+
+    adjacency_list = [[] for _ in range(max_node)]
+    for source, target in zip(sources, targets):
+        adjacency_list[source].append(target)
+
+    visited = set()
+    chains = []
+
+    def dfs(start):
+        visited.add(start)
+        chain = [start]
+        stack = [start]
+        while stack:
+            node = stack.pop()
+            for neighbor in adjacency_list[node]:
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    chain.append(neighbor)
+                    stack.append(neighbor)
+        return chain
+
+    for node in range(max_node):
+        if node not in visited and adjacency_list[node]:
+            chain = dfs(node)
+            chains.append(chain)
+
+    return (-1) ** np.array([len(chain) - 1 for chain in chains]).sum()
+
 
 
 @lru_cache(maxsize=256)
@@ -120,30 +184,22 @@ def comb_index(n: int, k: int):
     return index.reshape(-1, k)
 
 
-def prodofcombs(amps, n):
-    coeffs, indxs = amps
+def prodofcombs(amps, n, m):
+    coeffs, indxs, permix = amps
     if np.prod(np.sort(np.abs(coeffs))[-n:]) < 1e-8:
         return np.empty(0), np.empty(0, dtype=int)
 
     combix = comb_index(len(coeffs), n)
     orbs = indxs[combix]
-    xorbs = np.bitwise_xor.reduce(orbs, axis=1)
-    mask = np.bitwise_or.reduce(orbs, axis=1) == xorbs
+    rorbs = np.bitwise_or.reduce(orbs, axis=1)
+    porbs = np.unpackbits(rorbs.view(np.uint8)).reshape(rorbs.shape + (-1,))
+    mask = porbs.sum(axis=1) == n * m
 
     vecofprods = np.prod(coeffs[combix][mask], axis=1)[:, None]
-    vecoforbs = xorbs[mask]
+    vecoforbs = rorbs[mask]
+    vecofperms = permix[combix][mask]
 
-    return vecofprods, vecoforbs
-
-
-def prodofcombs_0(amps, n, m):
-    return (tuple([np.prod([entry[0] for entry in comb])]) + orbs
-            for comb in combinations(amps, n)
-            if len(set(orbs := sum([entry[1:] for entry in comb], ()))) == m * n)
-
-
-def filter_orbs(ind_1,ind_2):
-    return not any(elem in ind_2 for elem in ind_1)
+    return vecofprods, vecoforbs, vecofperms
 
 
 def relevant_amps(input_array):
@@ -156,8 +212,10 @@ def relevant_amps(input_array):
         norm_old = norm
     return input_array * (np.abs(input_array) > value)
 
+
 def mapper(func, *args, **kwargs):
     return tuple(map(lambda var: func(*var, **kwargs), *args))
+
 
 def main():
     xyz = '''N 0 0 0; N 0 1 0'''
